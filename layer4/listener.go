@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 	"net"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 func init() {
@@ -77,6 +80,11 @@ type listener struct {
 	wg *sync.WaitGroup
 }
 
+type tcpConnection interface {
+	SetKeepAlivePeriod(d time.Duration) error
+	SetKeepAlive(bool) error
+}
+
 // loop accept connection from underlying listener and pipe the connection if there are any
 func (l *listener) loop() {
 	for {
@@ -88,6 +96,13 @@ func (l *listener) loop() {
 		if err != nil {
 			l.err = err
 			break
+		} else {
+			if tconn, ok := conn.(tcpConnection); ok {
+				err = setKeepAliveWorkarround(tconn)
+				if err != nil {
+					l.logger.Warn("unable to set keepalive for new connection:", zap.Error(err))
+				}
+			}
 		}
 
 		l.wg.Add(1)
@@ -172,6 +187,37 @@ type tlsConnection struct {
 
 func (tc *tlsConnection) ConnectionState() tls.ConnectionState {
 	return *tc.connState
+}
+
+func setKeepAliveWorkarround(conn tcpConnection) error {
+	rawConn, err := conn.(*net.TCPConn).SyscallConn()
+	if err != nil {
+		return err
+	}
+
+	keepaliveParams := syscall.TCPKeepalive{
+		OnOff:    1,
+		Time:     120000,
+		Interval: 15000,
+	}
+	ret := uint32(0)
+	err = rawConn.Control(func(fd uintptr) {
+		err := syscall.WSAIoctl(
+			syscall.Handle(fd),
+			syscall.SIO_KEEPALIVE_VALS,
+			(*byte)(unsafe.Pointer(&keepaliveParams)),
+			uint32(unsafe.Sizeof(keepaliveParams)),
+			nil,
+			0,
+			&ret,
+			nil,
+			0,
+		)
+		if err != nil {
+			fmt.Println("WSAIoctl error:", err)
+		}
+	})
+	return err
 }
 
 // Interface guards

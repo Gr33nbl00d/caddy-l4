@@ -17,12 +17,11 @@ package layer4
 import (
 	"bytes"
 	"fmt"
+	"github.com/caddyserver/caddy/v2"
+	"go.uber.org/zap"
 	"net"
 	"sync"
 	"time"
-
-	"github.com/caddyserver/caddy/v2"
-	"go.uber.org/zap"
 )
 
 // Server represents a Caddy layer4 server.
@@ -71,6 +70,14 @@ func (s Server) serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
+		if tconn, ok := conn.(tcpConnection); ok {
+			err = setKeepAliveWorkarround(tconn)
+			//err = tconn.SetKeepAlivePeriod(fcl.keepAlivePeriod)
+			if err != nil {
+				s.logger.Warn("unable to set keepalive for new connection:", zap.Error(err))
+			}
+		}
+
 		go s.handle(conn)
 	}
 }
