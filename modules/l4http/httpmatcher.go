@@ -16,21 +16,25 @@ package l4http
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/mholt/caddy-l4/layer4"
-	"github.com/mholt/caddy-l4/modules/l4tls"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/hpack"
 	"io"
 	"net/http"
 	"net/url"
+
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
+
+	"github.com/mholt/caddy-l4/layer4"
+	"github.com/mholt/caddy-l4/modules/l4tls"
 )
 
 func init() {
-	caddy.RegisterModule(MatchHTTP{})
+	caddy.RegisterModule(&MatchHTTP{})
 }
 
 // MatchHTTP is able to match HTTP connections. The auto-generated
@@ -42,7 +46,7 @@ type MatchHTTP struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (MatchHTTP) CaddyModule() caddy.ModuleInfo {
+func (*MatchHTTP) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.matchers.http",
 		New: func() caddy.Module { return new(MatchHTTP) },
@@ -55,7 +59,7 @@ func (m *MatchHTTP) UnmarshalJSON(b []byte) error {
 }
 
 // MarshalJSON satisfies the json.Marshaler interface.
-func (m MatchHTTP) MarshalJSON() ([]byte, error) {
+func (m *MatchHTTP) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.MatcherSetsRaw)
 }
 
@@ -73,16 +77,30 @@ func (m *MatchHTTP) Provision(ctx caddy.Context) error {
 }
 
 // Match returns true if the conn starts with an HTTP request.
-func (m MatchHTTP) Match(cx *layer4.Connection) (bool, error) {
+func (m *MatchHTTP) Match(cx *layer4.Connection) (bool, error) {
 	// TODO: do we need a more standardized way to amortize matchers? or at least to remember decoded results from previous matchers?
 	req, ok := cx.GetVar("http_request").(*http.Request)
 	if !ok {
 		var err error
-		bufReader := bufio.NewReader(cx)
+
+		data := cx.MatchingBytes()
+		needMore, matched := m.isHttp(data)
+		if needMore {
+			if len(data) >= layer4.MaxMatchingBytes {
+				return false, layer4.ErrMatchingBufferFull
+			}
+			return false, layer4.ErrConsumedAllPrefetchedBytes
+		}
+		if !matched {
+			return false, nil
+		}
+
+		// use bufio reader which exactly matches the size of prefetched data,
+		// to not trigger all bytes consumed error
+		bufReader := bufio.NewReaderSize(cx, len(data))
 		req, err = http.ReadRequest(bufReader)
 		if err != nil {
-			// TODO: find a way to distinguish actual errors from mismatches
-			return false, nil
+			return false, err
 		}
 
 		// check if req is a http2 request made with prior knowledge and if so parse it
@@ -113,8 +131,27 @@ func (m MatchHTTP) Match(cx *layer4.Connection) (bool, error) {
 	return m.matcherSets.AnyMatch(req), nil
 }
 
+// isHttp test if the buffered data looks like HTTP by looking at the first line.
+// first boolean determines if more data is required
+func (m MatchHTTP) isHttp(data []byte) (bool, bool) {
+	// try to find the end of a http request line, for example " HTTP/1.1\r\n"
+	i := bytes.IndexByte(data, 0x0a) // find first new line
+	if i < 10 {
+		return true, false
+	}
+	// assume only \n line ending
+	start := i - 9 // position of space in front of HTTP
+	end := i - 3   // cut off version number "1.1" or "2.0"
+	// if we got a correct \r\n line ending shift the calculated start & end to the left
+	if data[i-1] == 0x0d {
+		start -= 1
+		end -= 1
+	}
+	return false, bytes.Compare(data[start:end], []byte(" HTTP/")) == 0
+}
+
 // Parses information from a http2 request with prior knowledge (RFC 7540 Section 3.4)
-func (m MatchHTTP) handleHttp2WithPriorKnowledge(reader io.Reader, req *http.Request) error {
+func (m *MatchHTTP) handleHttp2WithPriorKnowledge(reader io.Reader, req *http.Request) error {
 	// Does req contain a valid http2 magic?
 	// https://github.com/golang/net/blob/a630d4f3e7a22f21271532b4b88e1693824a838f/http2/h2c/h2c.go#L74
 	if req.Method != "PRI" || len(req.Header) != 0 || req.URL.Path != "*" || req.Proto != "HTTP/2.0" {
@@ -137,18 +174,19 @@ func (m MatchHTTP) handleHttp2WithPriorKnowledge(reader io.Reader, req *http.Req
 
 	// read the first 10 frames until we get a headers frame (skipping settings, window update & priority frames)
 	var frame http2.Frame
-	for i := 0; i < 10; i++ {
+	maxAttempts := 10
+	for i := 0; i < maxAttempts; i++ {
 		frame, err = framer.ReadFrame()
 		if err != nil {
 			return err
 		}
 		if frame.Header().Type == http2.FrameHeaders {
+			maxAttempts = 0
 			break
 		}
 	}
-
-	if frame.Header().Type != http2.FrameHeaders {
-		return fmt.Errorf("failed to read a http2 headers frame after 10 attempts")
+	if maxAttempts != 0 {
+		return fmt.Errorf("failed to read a http2 headers frame after %d attempts", maxAttempts)
 	}
 
 	decoder := hpack.NewDecoder(4096, nil) // max table size 4096 from http2.initialHeaderTableSize
@@ -183,10 +221,38 @@ func (m MatchHTTP) handleHttp2WithPriorKnowledge(reader io.Reader, req *http.Req
 	return err
 }
 
+// UnmarshalCaddyfile sets up the MatchHTTP from Caddyfile tokens. Syntax:
+//
+//	http {
+//		<matcher> [<args...>]
+//		not <matcher> [<args...>]
+//		not {
+//			<matcher> [<args...>]
+//		}
+//	}
+//	http <matcher> [<args...>]
+//	http not <matcher> [<args...>]
+//
+// Note: as per https://caddyserver.com/docs/json/apps/http/servers/routes/match/,
+// matchers within a set are AND'ed together. Arguments of this http matcher constitute
+// a single matcher set, thus no OR logic is supported. Instead, use multiple http matchers.
+func (m *MatchHTTP) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	d.Next() // consume wrapper name
+
+	matcherSet, err := caddyhttp.ParseCaddyfileNestedMatcherSet(d)
+	if err != nil {
+		return err
+	}
+	m.MatcherSetsRaw = append(m.MatcherSetsRaw, matcherSet)
+
+	return nil
+}
+
 // Interface guards
 var (
-	_ layer4.ConnMatcher = (*MatchHTTP)(nil)
-	_ caddy.Provisioner  = (*MatchHTTP)(nil)
-	_ json.Marshaler     = (*MatchHTTP)(nil)
-	_ json.Unmarshaler   = (*MatchHTTP)(nil)
+	_ caddy.Provisioner     = (*MatchHTTP)(nil)
+	_ caddyfile.Unmarshaler = (*MatchHTTP)(nil)
+	_ json.Marshaler        = (*MatchHTTP)(nil)
+	_ json.Unmarshaler      = (*MatchHTTP)(nil)
+	_ layer4.ConnMatcher    = (*MatchHTTP)(nil)
 )

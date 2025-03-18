@@ -1,15 +1,15 @@
 package l4socks
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/mholt/caddy-l4/layer4"
 	"go.uber.org/zap"
+
+	"github.com/mholt/caddy-l4/layer4"
 )
 
 func assertNoError(t *testing.T, err error) {
@@ -78,7 +78,7 @@ func TestSocks4Matcher_Match(t *testing.T) {
 				_ = out.Close()
 			}()
 
-			cx := layer4.WrapConnection(out, &bytes.Buffer{}, zap.NewNop())
+			cx := layer4.WrapConnection(out, []byte{}, zap.NewNop())
 			go func() {
 				_, err := in.Write(tc.data)
 				assertNoError(t, err)

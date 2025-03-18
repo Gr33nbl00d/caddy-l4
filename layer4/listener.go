@@ -1,29 +1,34 @@
 package layer4
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
-	"github.com/caddyserver/caddy/v2"
-	"go.uber.org/zap"
 	"net"
 	"runtime"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
+
+	"fmt"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"go.uber.org/zap"
+	"syscall"
 	"unsafe"
 )
 
 func init() {
-	caddy.RegisterModule(ListenerWrapper{})
+	caddy.RegisterModule(&ListenerWrapper{})
 }
 
 // ListenerWrapper is a Caddy module that wraps App as a listener wrapper, it doesn't support udp.
 type ListenerWrapper struct {
 	// Routes express composable logic for handling byte streams.
 	Routes RouteList `json:"routes,omitempty"`
+
+	// Maximum time connections have to complete the matching phase (the first terminal handler is matched). Default: 3s.
+	MatchingTimeout caddy.Duration `json:"matching_timeout,omitempty"`
 
 	compiledRoute Handler
 
@@ -32,7 +37,7 @@ type ListenerWrapper struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (ListenerWrapper) CaddyModule() caddy.ModuleInfo {
+func (*ListenerWrapper) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "caddy.listeners.layer4",
 		New: func() caddy.Module { return new(ListenerWrapper) },
@@ -44,11 +49,15 @@ func (lw *ListenerWrapper) Provision(ctx caddy.Context) error {
 	lw.ctx = ctx
 	lw.logger = ctx.Logger()
 
+	if lw.MatchingTimeout <= 0 {
+		lw.MatchingTimeout = caddy.Duration(MatchingTimeoutDefault)
+	}
+
 	err := lw.Routes.Provision(ctx)
 	if err != nil {
 		return err
 	}
-	lw.compiledRoute = lw.Routes.Compile(listenerHandler{}, lw.logger)
+	lw.compiledRoute = lw.Routes.Compile(lw.logger, time.Duration(lw.MatchingTimeout), listenerHandler{})
 
 	return nil
 }
@@ -60,6 +69,7 @@ func (lw *ListenerWrapper) WrapListener(l net.Listener) net.Listener {
 		Listener:      l,
 		logger:        lw.logger,
 		compiledRoute: lw.compiledRoute,
+		done:          make(chan struct{}),
 		connChan:      connChan,
 		wg:            new(sync.WaitGroup),
 	}
@@ -67,17 +77,60 @@ func (lw *ListenerWrapper) WrapListener(l net.Listener) net.Listener {
 	return li
 }
 
+// UnmarshalCaddyfile sets up the ListenerWrapper from Caddyfile tokens. Syntax:
+//
+//	layer4 {
+//		matching_timeout <duration>
+//		@a <matcher> [<matcher_args>]
+//		@b {
+//			<matcher> [<matcher_args>]
+//			<matcher> [<matcher_args>]
+//		}
+//		route @a @b {
+//			<handler> [<handler_args>]
+//		}
+//		@c <matcher> {
+//			<matcher_option> [<matcher_option_args>]
+//		}
+//		route @c {
+//			<handler> [<handler_args>]
+//			<handler> {
+//				<handler_option> [<handler_option_args>]
+//			}
+//		}
+//	}
+func (lw *ListenerWrapper) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	d.Next() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	if err := ParseCaddyfileNestedRoutes(d, &lw.Routes, &lw.MatchingTimeout); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 type listener struct {
 	net.Listener
 	logger        *zap.Logger
 	compiledRoute Handler
 
+	closed atomic.Bool
+	done   chan struct{}
 	// closed when there is a non-recoverable error and all handle goroutines are done
 	connChan chan net.Conn
-	err      error
 
 	// count running handles
 	wg *sync.WaitGroup
+}
+
+func (l *listener) Close() error {
+	l.closed.Store(true)
+	return l.Listener.Close()
 }
 
 type tcpConnection interface {
@@ -89,12 +142,12 @@ type tcpConnection interface {
 func (l *listener) loop() {
 	for {
 		conn, err := l.Listener.Accept()
-		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
+		var nerr net.Error
+		if errors.As(err, &nerr) && nerr.Temporary() && !l.closed.Load() {
 			l.logger.Error("temporary error accepting connection", zap.Error(err))
 			continue
 		}
 		if err != nil {
-			l.err = err
 			break
 		} else {
 			if tconn, ok := conn.(tcpConnection); ok {
@@ -114,8 +167,9 @@ func (l *listener) loop() {
 		l.wg.Wait()
 		close(l.connChan)
 	}()
+	close(l.done)
 	for conn := range l.connChan {
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -126,13 +180,13 @@ func (l *listener) handle(conn net.Conn) {
 	var err error
 	defer func() {
 		l.wg.Done()
-		if err != errHijacked {
-			conn.Close()
+		if !errors.Is(err, errHijacked) {
+			_ = conn.Close()
 		}
 	}()
 
-	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Reset()
+	buf := bufPool.Get().([]byte)
+	buf = buf[:0]
 	defer bufPool.Put(buf)
 
 	cx := WrapConnection(conn, buf, l.logger)
@@ -141,7 +195,7 @@ func (l *listener) handle(conn net.Conn) {
 	start := time.Now()
 	err = l.compiledRoute.Handle(cx)
 	duration := time.Since(start)
-	if err != nil && err != errHijacked {
+	if err != nil && !errors.Is(err, errHijacked) {
 		l.logger.Error("handling connection", zap.Error(err))
 	}
 
@@ -154,11 +208,15 @@ func (l *listener) handle(conn net.Conn) {
 }
 
 func (l *listener) Accept() (net.Conn, error) {
-	for conn := range l.connChan {
-		return conn, nil
+	select {
+	case conn, ok := <-l.connChan:
+		if ok {
+			return conn, nil
+		}
+		return nil, net.ErrClosed
+	case <-l.done:
+		return nil, net.ErrClosed
 	}
-	return nil, l.err
-
 }
 
 func (l *listener) pipeConnection(conn *Connection) error {
@@ -224,4 +282,5 @@ func setKeepAliveWorkarround(conn tcpConnection) error {
 var (
 	_ caddy.Module          = (*ListenerWrapper)(nil)
 	_ caddy.ListenerWrapper = (*ListenerWrapper)(nil)
+	_ caddyfile.Unmarshaler = (*ListenerWrapper)(nil)
 )

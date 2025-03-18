@@ -18,18 +18,20 @@ import (
 	"io"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+
 	"github.com/mholt/caddy-l4/layer4"
 )
 
 func init() {
-	caddy.RegisterModule(Handler{})
+	caddy.RegisterModule(&Handler{})
 }
 
 // Handler is a simple handler that writes what it reads.
 type Handler struct{}
 
 // CaddyModule returns the Caddy module information.
-func (Handler) CaddyModule() caddy.ModuleInfo {
+func (*Handler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.handlers.echo",
 		New: func() caddy.Module { return new(Handler) },
@@ -37,10 +39,32 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 }
 
 // Handle handles the connection.
-func (Handler) Handle(cx *layer4.Connection, _ layer4.Handler) error {
+func (*Handler) Handle(cx *layer4.Connection, _ layer4.Handler) error {
 	_, err := io.Copy(cx, cx)
 	return err
 }
 
-// Interface guard
-var _ layer4.NextHandler = (*Handler)(nil)
+// UnmarshalCaddyfile sets up the Handler from Caddyfile tokens. Syntax:
+//
+//	echo
+func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed layer4 connection handler '%s': blocks are not supported", wrapper)
+	}
+
+	return nil
+}
+
+// Interface guards
+var (
+	_ caddyfile.Unmarshaler = (*Handler)(nil)
+	_ layer4.NextHandler    = (*Handler)(nil)
+)

@@ -1,7 +1,6 @@
 package l4proxyprotocol
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net"
@@ -9,8 +8,9 @@ import (
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/mholt/caddy-l4/layer4"
 	"go.uber.org/zap"
+
+	"github.com/mholt/caddy-l4/layer4"
 )
 
 func assertString(t *testing.T, expected string, value string) {
@@ -25,11 +25,11 @@ func TestProxyProtocolHandleV1(t *testing.T) {
 	in, out := net.Pipe()
 	defer closePipe(wg, in, out)
 
-	cx := layer4.WrapConnection(in, &bytes.Buffer{}, zap.NewNop())
+	cx := layer4.WrapConnection(in, []byte{}, zap.NewNop())
 	go func() {
 		wg.Add(1)
 		defer wg.Done()
-		defer out.Close()
+		defer func() { _ = out.Close() }()
 		_, err := out.Write(ProxyV1Example)
 		assertNoError(t, err)
 	}()
@@ -63,11 +63,11 @@ func TestProxyProtocolHandleV2(t *testing.T) {
 	in, out := net.Pipe()
 	defer closePipe(wg, in, out)
 
-	cx := layer4.WrapConnection(in, &bytes.Buffer{}, zap.NewNop())
+	cx := layer4.WrapConnection(in, []byte{}, zap.NewNop())
 	go func() {
 		wg.Add(1)
 		defer wg.Done()
-		defer out.Close()
+		defer func() { _ = out.Close() }()
 		_, err := out.Write(ProxyV2Example)
 		assertNoError(t, err)
 	}()
@@ -101,11 +101,11 @@ func TestProxyProtocolHandleGarbage(t *testing.T) {
 	in, out := net.Pipe()
 	defer closePipe(wg, in, out)
 
-	cx := layer4.WrapConnection(in, &bytes.Buffer{}, zap.NewNop())
+	cx := layer4.WrapConnection(in, []byte{}, zap.NewNop())
 	go func() {
 		wg.Add(1)
 		defer wg.Done()
-		defer out.Close()
+		defer func() { _ = out.Close() }()
 		_, err := out.Write([]byte("some garbage"))
 		assertNoError(t, err)
 	}()

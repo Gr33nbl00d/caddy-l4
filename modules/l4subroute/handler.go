@@ -16,14 +16,17 @@ package l4subroute
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/mholt/caddy-l4/layer4"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"go.uber.org/zap"
+
+	"github.com/mholt/caddy-l4/layer4"
 )
 
 func init() {
-	caddy.RegisterModule(Handler{})
+	caddy.RegisterModule(&Handler{})
 }
 
 // Handler implements a handler that compiles and executes routes.
@@ -34,11 +37,14 @@ type Handler struct {
 	// The primary list of routes to compile and execute.
 	Routes layer4.RouteList `json:"routes,omitempty"`
 
+	// Maximum time connections have to complete the matching phase (the first terminal handler is matched). Default: 3s.
+	MatchingTimeout caddy.Duration `json:"matching_timeout,omitempty"`
+
 	logger *zap.Logger
 }
 
 // CaddyModule returns the Caddy module information.
-func (Handler) CaddyModule() caddy.ModuleInfo {
+func (*Handler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.handlers.subroute",
 		New: func() caddy.Module { return new(Handler) },
@@ -48,6 +54,10 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the module.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger(h)
+
+	if h.MatchingTimeout <= 0 {
+		h.MatchingTimeout = caddy.Duration(layer4.MatchingTimeoutDefault)
+	}
 
 	if h.Routes != nil {
 		err := h.Routes.Provision(ctx)
@@ -60,12 +70,50 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 // Handle handles the connections.
 func (h *Handler) Handle(cx *layer4.Connection, next layer4.Handler) error {
-	subroute := h.Routes.Compile(next, h.logger)
+	subroute := h.Routes.Compile(h.logger, time.Duration(h.MatchingTimeout), next)
 	return subroute.Handle(cx)
+}
+
+// UnmarshalCaddyfile sets up the Handler from Caddyfile tokens. Syntax:
+//
+//	subroute {
+//		matching_timeout <duration>
+//		@a <matcher> [<matcher_args>]
+//		@b {
+//			<matcher> [<matcher_args>]
+//			<matcher> [<matcher_args>]
+//		}
+//		route @a @b {
+//			<handler> [<handler_args>]
+//		}
+//		@c <matcher> {
+//			<matcher_option> [<matcher_option_args>]
+//		}
+//		route @c {
+//			<handler> [<handler_args>]
+//			<handler> {
+//				<handler_option> [<handler_option_args>]
+//			}
+//		}
+//	}
+func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	d.Next() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	if err := layer4.ParseCaddyfileNestedRoutes(d, &h.Routes, &h.MatchingTimeout); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Interface guards
 var (
-	_ caddy.Provisioner  = (*Handler)(nil)
-	_ layer4.NextHandler = (*Handler)(nil)
+	_ caddy.Provisioner     = (*Handler)(nil)
+	_ caddyfile.Unmarshaler = (*Handler)(nil)
+	_ layer4.NextHandler    = (*Handler)(nil)
 )

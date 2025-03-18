@@ -21,13 +21,16 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/mastercactapus/proxyprotocol"
-	"github.com/mholt/caddy-l4/layer4"
 	"go.uber.org/zap"
+
+	"github.com/mholt/caddy-l4/layer4"
 )
 
 func init() {
-	caddy.RegisterModule(Handler{})
+	caddy.RegisterModule(&Handler{})
 }
 
 // Handler is a connection handler that accepts the PROXY protocol.
@@ -44,7 +47,7 @@ type Handler struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (Handler) CaddyModule() caddy.ModuleInfo {
+func (*Handler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.handlers.proxy_protocol",
 		New: func() caddy.Module { return new(Handler) },
@@ -53,10 +56,12 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 
 // Provision sets up the module.
 func (h *Handler) Provision(ctx caddy.Context) error {
-	for _, s := range h.Allow {
-		_, n, err := net.ParseCIDR(s)
+	repl := caddy.NewReplacer()
+	for _, allowCIDR := range h.Allow {
+		allowCIDR = repl.ReplaceAll(allowCIDR, "")
+		_, n, err := net.ParseCIDR(allowCIDR)
 		if err != nil {
-			return fmt.Errorf("invalid subnet '%s': %w", s, err)
+			return fmt.Errorf("invalid subnet '%s': %w", allowCIDR, err)
 		}
 		h.rules = append(h.rules, proxyprotocol.Rule{Timeout: time.Duration(h.Timeout), Subnet: n})
 	}
@@ -90,7 +95,7 @@ func (h *Handler) tidyRules() {
 	})
 
 	if len(rules) > 0 {
-		// dedup
+		// deduplication
 		last := rules[0]
 		nf := rules[1:1]
 		for _, f := range rules[1:] {
@@ -164,6 +169,64 @@ func (h *Handler) Handle(cx *layer4.Connection, next layer4.Handler) error {
 	return next.Handle(cx.Wrap(conn))
 }
 
+// UnmarshalCaddyfile sets up the Handler from Caddyfile tokens. Syntax:
+//
+//	proxy_protocol {
+//		allow <ranges...>
+//		timeout <duration>
+//	}
+//
+// proxy_protocol
+func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	var hasTimeout bool
+	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		optionName := d.Val()
+		switch optionName {
+		case "allow":
+			if d.CountRemainingArgs() == 0 {
+				return d.ArgErr()
+			}
+			for d.NextArg() {
+				val := d.Val()
+				if val == "private_ranges" {
+					h.Allow = append(h.Allow, caddyhttp.PrivateRangesCIDR()...)
+					continue
+				}
+				h.Allow = append(h.Allow, val)
+			}
+		case "timeout":
+			if hasTimeout {
+				return d.Errf("duplicate %s option '%s'", wrapper, optionName)
+			}
+			if d.CountRemainingArgs() != 1 {
+				return d.ArgErr()
+			}
+			d.NextArg()
+			dur, err := caddy.ParseDuration(d.Val())
+			if err != nil {
+				return d.Errf("parsing %s option '%s' duration: %v", wrapper, optionName, err)
+			}
+			h.Timeout, hasTimeout = caddy.Duration(dur), true
+		default:
+			return d.ArgErr()
+		}
+
+		// No nested blocks are supported
+		if d.NextBlock(nesting + 1) {
+			return d.Errf("malformed %s option '%s': blocks are not supported", wrapper, optionName)
+		}
+	}
+
+	return nil
+}
+
 // GetConn gets the connection which holds the information received from the PROXY protocol.
 func GetConn(cx *layer4.Connection) net.Conn {
 	if val := cx.GetVar("l4.proxy_protocol.conn"); val != nil {
@@ -174,6 +237,7 @@ func GetConn(cx *layer4.Connection) net.Conn {
 
 // Interface guards
 var (
-	_ caddy.Provisioner  = (*Handler)(nil)
-	_ layer4.NextHandler = (*Handler)(nil)
+	_ caddy.Provisioner     = (*Handler)(nil)
+	_ caddyfile.Unmarshaler = (*Handler)(nil)
+	_ layer4.NextHandler    = (*Handler)(nil)
 )

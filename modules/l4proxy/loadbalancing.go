@@ -20,10 +20,13 @@ import (
 	"hash/fnv"
 	weakrand "math/rand"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+
 	"github.com/mholt/caddy-l4/layer4"
 )
 
@@ -74,14 +77,12 @@ type Selector interface {
 }
 
 func init() {
-	caddy.RegisterModule(RandomSelection{})
-	caddy.RegisterModule(RandomChoiceSelection{})
-	caddy.RegisterModule(LeastConnSelection{})
-	caddy.RegisterModule(RoundRobinSelection{})
-	caddy.RegisterModule(FirstSelection{})
-	caddy.RegisterModule(IPHashSelection{})
-
-	weakrand.Seed(time.Now().UTC().UnixNano())
+	caddy.RegisterModule(&RandomSelection{})
+	caddy.RegisterModule(&RandomChoiceSelection{})
+	caddy.RegisterModule(&LeastConnSelection{})
+	caddy.RegisterModule(&RoundRobinSelection{})
+	caddy.RegisterModule(&FirstSelection{})
+	caddy.RegisterModule(&IPHashSelection{})
 }
 
 // RandomSelection is a policy that selects
@@ -89,7 +90,7 @@ func init() {
 type RandomSelection struct{}
 
 // CaddyModule returns the Caddy module information.
-func (RandomSelection) CaddyModule() caddy.ModuleInfo {
+func (*RandomSelection) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.proxy.selection_policies.random",
 		New: func() caddy.Module { return new(RandomSelection) },
@@ -97,7 +98,7 @@ func (RandomSelection) CaddyModule() caddy.ModuleInfo {
 }
 
 // Select returns an available host, if any.
-func (r RandomSelection) Select(pool UpstreamPool, conn *layer4.Connection) *Upstream {
+func (r *RandomSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
 	// use reservoir sampling because the number of available
 	// hosts isn't known: https://en.wikipedia.org/wiki/Reservoir_sampling
 	var randomHost *Upstream
@@ -106,7 +107,7 @@ func (r RandomSelection) Select(pool UpstreamPool, conn *layer4.Connection) *Ups
 		if !upstream.available() {
 			continue
 		}
-		// (n % 1 == 0) holds for all n, therefore a
+		// (n % 1 == 0) holds for all n, therefore an
 		// upstream will always be chosen if there is at
 		// least one available
 		count++
@@ -115,6 +116,25 @@ func (r RandomSelection) Select(pool UpstreamPool, conn *layer4.Connection) *Ups
 		}
 	}
 	return randomHost
+}
+
+// UnmarshalCaddyfile sets up the RandomSelection from Caddyfile tokens. Syntax:
+//
+//	random
+func (r *RandomSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed %s selection policy: blocks are not supported", wrapper)
+	}
+
+	return nil
 }
 
 // RandomChoiceSelection is a policy that selects
@@ -127,7 +147,7 @@ type RandomChoiceSelection struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (RandomChoiceSelection) CaddyModule() caddy.ModuleInfo {
+func (*RandomChoiceSelection) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.proxy.selection_policies.random_choose",
 		New: func() caddy.Module { return new(RandomChoiceSelection) },
@@ -135,7 +155,7 @@ func (RandomChoiceSelection) CaddyModule() caddy.ModuleInfo {
 }
 
 // Provision sets up r.
-func (r *RandomChoiceSelection) Provision(ctx caddy.Context) error {
+func (r *RandomChoiceSelection) Provision(_ caddy.Context) error {
 	if r.Choose == 0 {
 		r.Choose = 2
 	}
@@ -143,7 +163,7 @@ func (r *RandomChoiceSelection) Provision(ctx caddy.Context) error {
 }
 
 // Validate ensures that r's configuration is valid.
-func (r RandomChoiceSelection) Validate() error {
+func (r *RandomChoiceSelection) Validate() error {
 	if r.Choose < 2 {
 		return fmt.Errorf("choose must be at least 2")
 	}
@@ -151,7 +171,7 @@ func (r RandomChoiceSelection) Validate() error {
 }
 
 // Select returns an available host, if any.
-func (r RandomChoiceSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
+func (r *RandomChoiceSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
 	k := r.Choose
 	if k > len(pool) {
 		k = len(pool)
@@ -169,13 +189,41 @@ func (r RandomChoiceSelection) Select(pool UpstreamPool, _ *layer4.Connection) *
 	return leastConns(choices)
 }
 
+// UnmarshalCaddyfile sets up the RandomChoiceSelection from Caddyfile tokens. Syntax:
+//
+//	random_choose <int>
+//	random_choose
+func (r *RandomChoiceSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// Only one same-line option is supported
+	if d.CountRemainingArgs() > 1 {
+		return d.ArgErr()
+	}
+
+	if d.NextArg() {
+		val, err := strconv.ParseInt(d.Val(), 10, 32)
+		if err != nil {
+			return err
+		}
+		r.Choose = int(val)
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed %s selection policy: blocks are not supported", wrapper)
+	}
+
+	return nil
+}
+
 // LeastConnSelection is a policy that selects the upstream
 // with the least active connections. If multiple upstreams
 // have the same fewest number, one is chosen randomly.
 type LeastConnSelection struct{}
 
 // CaddyModule returns the Caddy module information.
-func (LeastConnSelection) CaddyModule() caddy.ModuleInfo {
+func (*LeastConnSelection) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.proxy.selection_policies.least_conn",
 		New: func() caddy.Module { return new(LeastConnSelection) },
@@ -185,7 +233,7 @@ func (LeastConnSelection) CaddyModule() caddy.ModuleInfo {
 // Select selects the up host with the least number of connections in the
 // pool. If more than one host has the same least number of connections,
 // one of the hosts is chosen at random.
-func (LeastConnSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
+func (*LeastConnSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
 	var best *Upstream
 	var count int
 	leastConns := -1
@@ -213,6 +261,25 @@ func (LeastConnSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstr
 	return best
 }
 
+// UnmarshalCaddyfile sets up the LeastConnSelection from Caddyfile tokens. Syntax:
+//
+//	least_conn
+func (r *LeastConnSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed %s selection policy: blocks are not supported", wrapper)
+	}
+
+	return nil
+}
+
 // RoundRobinSelection is a policy that selects
 // a host based on round-robin ordering.
 type RoundRobinSelection struct {
@@ -220,7 +287,7 @@ type RoundRobinSelection struct {
 }
 
 // CaddyModule returns the Caddy module information.
-func (RoundRobinSelection) CaddyModule() caddy.ModuleInfo {
+func (*RoundRobinSelection) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.proxy.selection_policies.round_robin",
 		New: func() caddy.Module { return new(RoundRobinSelection) },
@@ -243,12 +310,31 @@ func (r *RoundRobinSelection) Select(pool UpstreamPool, _ *layer4.Connection) *U
 	return nil
 }
 
+// UnmarshalCaddyfile sets up the RoundRobinSelection from Caddyfile tokens. Syntax:
+//
+//	round_robin
+func (r *RoundRobinSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed %s selection policy: blocks are not supported", wrapper)
+	}
+
+	return nil
+}
+
 // FirstSelection is a policy that selects
 // the first available host.
 type FirstSelection struct{}
 
 // CaddyModule returns the Caddy module information.
-func (FirstSelection) CaddyModule() caddy.ModuleInfo {
+func (*FirstSelection) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.proxy.selection_policies.first",
 		New: func() caddy.Module { return new(FirstSelection) },
@@ -256,7 +342,7 @@ func (FirstSelection) CaddyModule() caddy.ModuleInfo {
 }
 
 // Select returns an available host, if any.
-func (FirstSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
+func (*FirstSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream {
 	for _, host := range pool {
 		if host.available() {
 			return host
@@ -265,12 +351,31 @@ func (FirstSelection) Select(pool UpstreamPool, _ *layer4.Connection) *Upstream 
 	return nil
 }
 
+// UnmarshalCaddyfile sets up the FirstSelection from Caddyfile tokens. Syntax:
+//
+//	first
+func (r *FirstSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed %s selection policy: blocks are not supported", wrapper)
+	}
+
+	return nil
+}
+
 // IPHashSelection is a policy that selects a host
 // based on hashing the remote IP of the connection.
 type IPHashSelection struct{}
 
 // CaddyModule returns the Caddy module information.
-func (IPHashSelection) CaddyModule() caddy.ModuleInfo {
+func (*IPHashSelection) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "layer4.proxy.selection_policies.ip_hash",
 		New: func() caddy.Module { return new(IPHashSelection) },
@@ -278,13 +383,32 @@ func (IPHashSelection) CaddyModule() caddy.ModuleInfo {
 }
 
 // Select returns an available host, if any.
-func (IPHashSelection) Select(pool UpstreamPool, conn *layer4.Connection) *Upstream {
+func (*IPHashSelection) Select(pool UpstreamPool, conn *layer4.Connection) *Upstream {
 	remoteAddr := conn.Conn.RemoteAddr().String()
 	clientIP, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		clientIP = remoteAddr
 	}
 	return hostByHashing(pool, clientIP)
+}
+
+// UnmarshalCaddyfile sets up the IPHashSelection from Caddyfile tokens. Syntax:
+//
+//	ip_hash
+func (r *IPHashSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	_, wrapper := d.Next(), d.Val() // consume wrapper name
+
+	// No same-line options are supported
+	if d.CountRemainingArgs() > 0 {
+		return d.ArgErr()
+	}
+
+	// No blocks are supported
+	if d.NextBlock(d.Nesting()) {
+		return d.Errf("malformed %s selection policy: blocks are not supported", wrapper)
+	}
+
+	return nil
 }
 
 // leastConns returns the upstream with the
@@ -351,4 +475,11 @@ var (
 
 	_ caddy.Validator   = (*RandomChoiceSelection)(nil)
 	_ caddy.Provisioner = (*RandomChoiceSelection)(nil)
+
+	_ caddyfile.Unmarshaler = (*RandomSelection)(nil)
+	_ caddyfile.Unmarshaler = (*RandomChoiceSelection)(nil)
+	_ caddyfile.Unmarshaler = (*LeastConnSelection)(nil)
+	_ caddyfile.Unmarshaler = (*RoundRobinSelection)(nil)
+	_ caddyfile.Unmarshaler = (*FirstSelection)(nil)
+	_ caddyfile.Unmarshaler = (*IPHashSelection)(nil)
 )

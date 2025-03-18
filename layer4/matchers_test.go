@@ -1,7 +1,6 @@
 package layer4
 
 import (
-	"bytes"
 	"net"
 	"testing"
 
@@ -49,7 +48,7 @@ type provisionableMatcher interface {
 }
 
 func provision(in provisionableMatcher) ConnMatcher {
-	in.Provision(caddy.Context{})
+	_ = in.Provision(caddy.Context{})
 	return in
 }
 func TestNotMatcher(t *testing.T) {
@@ -70,13 +69,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "127.0.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "127.0.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"127.0.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"127.0.0.1"}}),
 					},
 				},
 			},
@@ -89,13 +87,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "127.0.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "192.168.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"127.0.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"127.0.0.1"}}),
 					},
 				},
 			},
@@ -108,13 +105,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "127.0.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "192.168.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"172.16.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"172.16.0.1"}}),
 					},
 					{
 						provision(&MatchLocalIP{Ranges: []string{"127.0.0.1"}}),
@@ -130,13 +126,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "127.0.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "172.16.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"172.16.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"172.16.0.1"}}),
 					},
 					{
 						provision(&MatchLocalIP{Ranges: []string{"127.0.0.1"}}),
@@ -152,13 +147,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "192.168.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "192.168.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"172.16.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"172.16.0.1"}}),
 					},
 					{
 						provision(&MatchLocalIP{Ranges: []string{"127.0.0.1"}}),
@@ -174,13 +168,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "127.0.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "172.16.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"172.16.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"172.16.0.1"}}),
 						provision(&MatchLocalIP{Ranges: []string{"127.0.0.1"}}),
 					},
 				},
@@ -194,13 +187,12 @@ func TestNotMatcher(t *testing.T) {
 					localAddr:  dummyAddr{ip: "127.0.0.1", network: "tcp"},
 					remoteAddr: dummyAddr{ip: "192.168.0.1", network: "tcp"},
 				},
-				buf:    &bytes.Buffer{},
 				Logger: zap.NewNop(),
 			},
 			matcher: MatchNot{
 				MatcherSets: []MatcherSet{
 					{
-						provision(&MatchIP{Ranges: []string{"172.16.0.1"}}),
+						provision(&MatchRemoteIP{Ranges: []string{"172.16.0.1"}}),
 						provision(&MatchLocalIP{Ranges: []string{"127.0.0.1"}}),
 					},
 				},

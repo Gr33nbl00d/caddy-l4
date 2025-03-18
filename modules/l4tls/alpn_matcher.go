@@ -18,28 +18,38 @@ import (
 	"crypto/tls"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
 )
 
 func init() {
-	caddy.RegisterModule(MatchALPN{})
+	caddy.RegisterModule(&MatchALPN{})
 }
 
 type MatchALPN []string
 
 // CaddyModule returns the Caddy module information.
-func (MatchALPN) CaddyModule() caddy.ModuleInfo {
+func (*MatchALPN) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "tls.handshake_match.alpn",
 		New: func() caddy.Module { return new(MatchALPN) },
 	}
 }
 
-func (m MatchALPN) Match(hello *tls.ClientHelloInfo) bool {
+func (m *MatchALPN) Match(hello *tls.ClientHelloInfo) bool {
+	repl := caddy.NewReplacer()
+	if ctx := hello.Context(); ctx != nil {
+		// In some situations the existing context may have no replacer
+		if replAny := ctx.Value(caddy.ReplacerCtxKey); replAny != nil {
+			repl = replAny.(*caddy.Replacer)
+		}
+	}
+
 	clientProtocols := hello.SupportedProtos
-	for _, alpn := range m {
+	for _, alpn := range *m {
+		alpn = repl.ReplaceAll(alpn, "")
 		for _, clientProtocol := range clientProtocols {
-			if alpn == string(clientProtocol) {
+			if alpn == clientProtocol {
 				return true
 			}
 		}
@@ -47,7 +57,31 @@ func (m MatchALPN) Match(hello *tls.ClientHelloInfo) bool {
 	return false
 }
 
+// UnmarshalCaddyfile sets up the MatchALPN from Caddyfile tokens. Syntax:
+//
+//	alpn <values...>
+func (m *MatchALPN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		wrapper := d.Val()
+
+		// At least one same-line option must be provided
+		if d.CountRemainingArgs() == 0 {
+			return d.ArgErr()
+		}
+
+		*m = append(*m, d.RemainingArgs()...)
+
+		// No blocks are supported
+		if d.NextBlock(d.Nesting()) {
+			return d.Errf("malformed TLS handshake matcher '%s': blocks are not supported", wrapper)
+		}
+	}
+
+	return nil
+}
+
 // Interface guards
 var (
 	_ caddytls.ConnectionMatcher = (*MatchALPN)(nil)
+	_ caddyfile.Unmarshaler      = (*MatchALPN)(nil)
 )
